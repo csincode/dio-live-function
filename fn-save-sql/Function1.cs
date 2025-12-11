@@ -1,47 +1,80 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
+using System.Text.Json;
 using System.Threading.Tasks;
-using Microsoft.Azure.Functions.Worker.Extensions.Sql;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
+using Microsoft.Azure.Functions.Worker.Extensions.Sql;
 using Microsoft.Extensions.Logging;
-using Newtonsoft.Json;
 using fn_save_sql.Model;
 
 namespace AzureSQL.ToDo
 {
-    public static class PostToDo
+    public class PostToDo
     {
-        // create a new ToDoItem from body object
-        // uses output binding to insert new item into ToDo table
-        [Function(nameof(PostToDo))]
-        public static async Task<OutputType> Run(
-            [HttpTrigger(AuthorizationLevel.Function, "post", Route = "PostFunction")] HttpRequestData req,
-            FunctionContext executionContext)
+        private readonly ILogger<PostToDo> _logger;
+        private readonly string _baseUrl;
+
+        public PostToDo(ILogger<PostToDo> logger)
         {
-            var logger = executionContext.GetLogger("PostToDo");
-            logger.LogInformation("C# HTTP trigger function processed a request.");
+            _logger = logger;
+            _baseUrl = Environment.GetEnvironmentVariable("ToDoUri") ?? "https://default-url/";
+        }
 
-            string requestBody = await new StreamReader(req.Body).ReadToEndAsync();
-            ToDoItem toDoItem = JsonConvert.DeserializeObject<ToDoItem>(requestBody);
+        [Function(nameof(PostToDo))]
+        public async Task<OutputType> Run(
+            [HttpTrigger(AuthorizationLevel.Function, "post", Route = "PostFunction")] HttpRequestData req)
+        {
+            _logger.LogInformation("Processing POST request for ToDo item...");
 
-            // generate a new id for the todo item
-            toDoItem.Id = Guid.NewGuid();
+            // Read body safely
+            string body = await req.ReadAsStringAsync();
+            if (string.IsNullOrWhiteSpace(body))
+                return Error(req, "Request body is empty.");
 
-            // set Url from env variable ToDoUri
-            toDoItem.url = "google.com/" + "?id=" + toDoItem.Id.ToString();
+            ToDoItem item;
 
-            // if completed is not provided, default to false
-            if (toDoItem.completed == null)
+            try
             {
-                toDoItem.completed = false;
+                item = JsonSerializer.Deserialize<ToDoItem>(body);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Invalid JSON received.");
+                return Error(req, "Invalid JSON payload.");
             }
 
-            return new OutputType()
+            // Validation
+            if (item == null)
+                return Error(req, "Invalid or empty object.");
+
+            if (string.IsNullOrEmpty(item.Title))
+                return Error(req, "The 'title' field is required.");
+
+            // Business logic
+            item.Id = Guid.NewGuid();
+            item.Completed = item.Completed ?? false; 
+            item.Url = $"{_baseUrl}?id={item.Id}";
+
+            var response = req.CreateResponse(System.Net.HttpStatusCode.Created);
+            await response.WriteAsJsonAsync(item);
+
+            return new OutputType
             {
-                ToDoItem = toDoItem,
-                HttpResponse = req.CreateResponse(System.Net.HttpStatusCode.Created)
+                ToDoItem = item,
+                HttpResponse = response
+            };
+        }
+
+        private OutputType Error(HttpRequestData req, string message)
+        {
+            var response = req.CreateResponse(System.Net.HttpStatusCode.BadRequest);
+            response.WriteString(message);
+
+            return new OutputType
+            {
+                HttpResponse = response,
+                ToDoItem = null
             };
         }
     }
